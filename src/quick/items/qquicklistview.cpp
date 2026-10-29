@@ -2063,7 +2063,7 @@ bool QQuickListViewPrivate::flick(AxisData &data, qreal minExtent, qreal maxExte
                 }
             }
             timeline.reset(data.move);
-            timeline.accel(data.move, v, accel, maxDistance + overshootDist);
+            animateFlick(data, v, accel, maxDistance + overshootDist);
             timeline.callback(QQuickTimeLineCallback(&data.move, fixupCallback, this));
             correctFlick = true;
             return true;
@@ -2093,7 +2093,10 @@ bool QQuickListViewPrivate::flick(AxisData &data, qreal minExtent, qreal maxExte
                 return false;
             }
             timeline.reset(data.move);
-            timeline.accelDistance(data.move, v, -dist);
+            if (q_func()->flickEasing().type() == QEasingCurve::OutQuad)
+                timeline.accelDistance(data.move, v, -dist);
+            else
+                animateFlick(data, v, v * v / (2 * qAbs(dist)), qAbs(dist));
             timeline.callback(QQuickTimeLineCallback(&data.move, fixupCallback, this));
             return false;
         }

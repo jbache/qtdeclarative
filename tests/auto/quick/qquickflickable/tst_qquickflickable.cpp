@@ -17,6 +17,7 @@
 #include <private/qquicktaphandler_p.h>
 #include <math.h>
 #include <QtGui/qpa/qplatformintegration.h>
+#include <QtGui/qpa/qplatformtheme.h>
 #include <QtQuickTestUtils/private/qmlutils_p.h>
 #include <QtQuickTestUtils/private/geometrytestutils_p.h>
 #include <QtQuickTestUtils/private/viewtestutils_p.h>
@@ -28,6 +29,16 @@ Q_LOGGING_CATEGORY(lcTests, "qt.quick.tests")
 
 using namespace QQuickViewTestUtils;
 using namespace QQuickVisualTestUtils;
+
+class FlickTimeLineTestAccess : public QQuickTimeLine
+{
+public:
+    static void advance(QQuickTimeLine &timeline, int time)
+    {
+        const auto update = &FlickTimeLineTestAccess::updateCurrentTime;
+        (timeline.*update)(time);
+    }
+};
 
 // an abstract Slider which only handles touch events
 class TouchDragArea : public QQuickItem
@@ -167,6 +178,10 @@ private slots:
     void rebound();
     void maximumFlickVelocity();
     void flickDeceleration();
+    void flickEasing();
+    void flickEasingMotion_data();
+    void flickEasingMotion();
+    void flickCurvesDemo();
     void pressDelay_data();
     void pressDelay();
     void nestedPressDelay();
@@ -539,6 +554,313 @@ void tst_qquickflickable::flickDeceleration()
     QCOMPARE(spy.size(),1);
 
     delete flickable;
+}
+
+void tst_qquickflickable::flickEasing()
+{
+    QQuickFlickable flickable;
+    QSignalSpy spy(&flickable, &QQuickFlickable::flickEasingChanged);
+    const auto platformEasing = QGuiApplicationPrivate::platformTheme()
+            ->themeHint(QPlatformTheme::FlickEasing).value<QEasingCurve>();
+    QCOMPARE(QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickEasing).value<QEasingCurve>(),
+             QEasingCurve(QEasingCurve::OutQuad));
+    if (QGuiApplication::platformName() == "cocoa" || QGuiApplication::platformName() == "ios") {
+        QEasingCurve appleEasing(QEasingCurve::BezierSpline);
+        appleEasing.addCubicBezierSegment(QPointF(0.16, 1), QPointF(0.3, 1), QPointF(1, 1));
+        QCOMPARE(platformEasing, appleEasing);
+    }
+    QCOMPARE(flickable.flickEasing(), platformEasing);
+    flickable.setFlickEasing(QEasingCurve(QEasingCurve::OutExpo));
+    QCOMPARE(flickable.flickEasing(), QEasingCurve(QEasingCurve::OutExpo));
+    QCOMPARE(spy.size(), 1);
+    flickable.setFlickEasing(flickable.flickEasing());
+    QCOMPARE(spy.size(), 1);
+    flickable.resetFlickEasing();
+    QCOMPARE(flickable.flickEasing(), platformEasing);
+    QCOMPARE(spy.size(), 2);
+    flickable.setFlickEasing(platformEasing);
+    QCOMPARE(spy.size(), 2);
+    flickable.resetFlickEasing();
+    QCOMPARE(spy.size(), 2);
+
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(R"(
+        import QtQuick 6.12
+        Flickable {
+            flickEasing.type: Easing.BezierSpline
+            flickEasing.bezierCurve: [0.16, 1, 0.3, 1, 1, 1]
+            function resetEasing() { flickEasing = undefined }
+        }
+    )", QUrl());
+    QScopedPointer<QObject> object(component.create());
+    QVERIFY2(object, qPrintable(component.errorString()));
+    auto *qmlFlickable = qobject_cast<QQuickFlickable *>(object.data());
+    QVERIFY(qmlFlickable);
+    QEasingCurve bezier(QEasingCurve::BezierSpline);
+    bezier.addCubicBezierSegment(QPointF(0.16, 1), QPointF(0.3, 1), QPointF(1, 1));
+    QCOMPARE(qmlFlickable->flickEasing(), bezier);
+    QVERIFY(QMetaObject::invokeMethod(object.data(), "resetEasing"));
+    QCOMPARE(qmlFlickable->flickEasing(), platformEasing);
+    qmlFlickable->setFlickEasing(QEasingCurve(QEasingCurve::Linear));
+    QVERIFY(QMetaObject::invokeMethod(object.data(), "resetEasing"));
+    QCOMPARE(qmlFlickable->flickEasing(), platformEasing);
+
+    component.setData("import QtQuick 6.11; Flickable { flickEasing.type: Easing.OutExpo }",
+                      QUrl());
+    QVERIFY(component.isError());
+
+    QEasingCurve oldEasing = bezier;
+    oldEasing.setType(QEasingCurve::OutQuad);
+    flickable.setFlickEasing(oldEasing);
+    auto *priv = QQuickFlickablePrivate::get(&flickable);
+    QQuickFlickable legacyFlickable;
+    legacyFlickable.setFlickEasing(QEasingCurve(QEasingCurve::OutQuad));
+    auto *legacyPriv = QQuickFlickablePrivate::get(&legacyFlickable);
+    priv->animateFlick(priv->vData, -987, 1000, 100);
+    legacyPriv->animateFlick(legacyPriv->vData, -987, 1000, 100);
+    QCOMPARE(priv->timeline.duration(), legacyPriv->timeline.duration());
+    for (int time : {0, 100, 202}) {
+        FlickTimeLineTestAccess::advance(priv->timeline, time);
+        FlickTimeLineTestAccess::advance(legacyPriv->timeline, time);
+        QCOMPARE(priv->vData.move.value(), legacyPriv->vData.move.value());
+    }
+}
+
+void tst_qquickflickable::flickEasingMotion_data()
+{
+    QTest::addColumn<QByteArray>("view");
+    QTest::addColumn<QEasingCurve>("easing");
+    QTest::addColumn<bool>("usePlatformDefault");
+    QTest::addColumn<bool>("horizontal");
+    QTest::addColumn<bool>("backwards");
+
+    QEasingCurve bezier(QEasingCurve::BezierSpline);
+    bezier.addCubicBezierSegment(QPointF(0.16, 1), QPointF(0.3, 1), QPointF(1, 1));
+    const QList<QEasingCurve> curves = {
+        QEasingCurve(QEasingCurve::OutQuad), QEasingCurve(QEasingCurve::Linear),
+        QEasingCurve(QEasingCurve::OutExpo), bezier, QEasingCurve(QEasingCurve::OutBack),
+        QGuiApplicationPrivate::platformTheme()->themeHint(QPlatformTheme::FlickEasing).value<QEasingCurve>()
+    };
+    const QList<QByteArray> views = {"Flickable", "ListView", "GridView",
+                                   "ListViewSnap", "GridViewSnap"};
+    for (const auto &view : views) {
+        for (qsizetype curve = 0; curve < curves.size(); ++curve) {
+            for (bool horizontal : {false, true}) {
+                for (bool backwards : {false, true}) {
+                    const QByteArray name = view + '-' + QByteArray::number(curve)
+                            + (horizontal ? "-horizontal" : "-vertical")
+                            + (backwards ? "-backwards" : "-forwards");
+                    QTest::newRow(name.constData()) << view << curves[curve]
+                                                  << (curve == curves.size() - 1)
+                                                  << horizontal << backwards;
+                }
+            }
+        }
+    }
+}
+
+void tst_qquickflickable::flickEasingMotion()
+{
+    QFETCH(QByteArray, view);
+    QFETCH(QEasingCurve, easing);
+    QFETCH(bool, usePlatformDefault);
+    QFETCH(bool, horizontal);
+    QFETCH(bool, backwards);
+
+    QByteArray source = "import QtQuick 6.12; ";
+    if (view == "Flickable") {
+        source += "Flickable { contentWidth: 100000; contentHeight: 100000;";
+    } else if (view.startsWith("ListView")) {
+        source += "ListView { model: 1000; delegate: Item { width: 100; height: 100 } ";
+        if (horizontal)
+            source += "orientation: ListView.Horizontal;";
+        if (view.endsWith("Snap"))
+            source += "snapMode: ListView.SnapToItem;";
+    } else {
+        source += "GridView { model: 1000; cellWidth: 100; cellHeight: 100;"
+                  "delegate: Item { width: 100; height: 100 } ";
+        if (horizontal)
+            source += "flow: GridView.FlowTopToBottom;";
+        if (view.endsWith("Snap"))
+            source += "snapMode: GridView.SnapToRow;";
+    }
+    source += "width: 200; height: 200; boundsBehavior: Flickable.StopAtBounds;"
+              "flickDeceleration: 1000; }";
+
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(source, QUrl());
+    QQuickWindow window;
+    window.resize(200, 200);
+    QScopedPointer<QObject> object(component.create());
+    QVERIFY2(object, qPrintable(component.errorString()));
+    auto *flickable = qobject_cast<QQuickFlickable *>(object.data());
+    QVERIFY(flickable);
+    flickable->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(QQuickTest::qWaitForPolish(flickable));
+    if (horizontal)
+        flickable->setContentX(1000);
+    else
+        flickable->setContentY(1000);
+    if (!usePlatformDefault)
+        flickable->setFlickEasing(easing);
+    QCOMPARE(flickable->flickEasing(), easing);
+    const qreal velocity = backwards ? 1000 : -1000;
+    flickable->flick(horizontal ? velocity : 0, horizontal ? 0 : velocity);
+    auto *priv = QQuickFlickablePrivate::get(flickable);
+    QVERIFY(flickable->isFlicking());
+    FlickTimeLineTestAccess::advance(priv->timeline, 0);
+    FlickTimeLineTestAccess::advance(priv->timeline, 500);
+    const qreal direction = backwards ? -1 : 1;
+    const qreal expected = 1000 + direction * 500 * easing.valueForProgress(0.5);
+    const qreal actual = horizontal ? flickable->contentX() : flickable->contentY();
+    QVERIFY2(qAbs(actual - expected) < 0.01,
+             qPrintable(QString("actual %1, expected %2").arg(actual).arg(expected)));
+    FlickTimeLineTestAccess::advance(priv->timeline, 1000);
+    QCOMPARE(horizontal ? flickable->contentX() : flickable->contentY(),
+             1000 + direction * 500);
+    flickable->cancelFlick();
+}
+
+void tst_qquickflickable::flickCurvesDemo()
+{
+    QQmlEngine engine;
+    QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+    const QString file = QFINDTESTDATA("../../../manual/touch/flickcurves.qml");
+    QVERIFY(!file.isEmpty());
+    QQmlComponent component(&engine, QUrl::fromLocalFile(file));
+    QQuickWindow window;
+    window.resize(1200, 780);
+    QScopedPointer<QObject> object(component.create());
+    QVERIFY2(object, qPrintable(component.errorString()));
+    auto *root = qobject_cast<QQuickItem *>(object.data());
+    QVERIFY(root);
+    root->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    for (int kind = 0; kind < 3; ++kind) {
+        QVERIFY(root->setProperty("viewKind", kind));
+        QVERIFY(QQuickTest::qWaitForPolish(&window));
+        QList<QQuickFlickable *> views;
+        for (int index = 0; index < 4; ++index) {
+            auto *view = findItem<QQuickFlickable>(root, "curveView" + QString::number(index));
+            QVERIFY(view);
+            views.append(view);
+        }
+        if (kind == 2) {
+            auto *picture = findItem<QQuickItem>(root, "gridPicture");
+            QVERIFY(picture);
+            QTRY_COMPARE(picture->property("status").toInt(), 1);
+        }
+        QVERIFY(QMetaObject::invokeMethod(root, "replay"));
+        QTRY_VERIFY(views[0]->isFlicking());
+        QTRY_VERIFY(views[0]->contentY() > 1100);
+        QVERIFY(views[1]->contentY() > views[0]->contentY());
+        QVERIFY(views[2]->contentY() > views[0]->contentY());
+        const QImage frame = window.grabWindow();
+        QVERIFY(!frame.isNull());
+        QVERIFY(frame.save(QDir::tempPath() + "/qt-flick-curves-" + QString::number(kind) + ".png"));
+        bool hasContent = false;
+        for (int vertical = 32; vertical < frame.height() && !hasContent; vertical += 32) {
+            for (int horizontal = 32; horizontal < frame.width(); horizontal += 32) {
+                if (frame.pixelColor(horizontal, vertical) != frame.pixelColor(5, 5)) {
+                    hasContent = true;
+                    break;
+                }
+            }
+        }
+        QVERIFY(hasContent);
+        for (auto *view : views) {
+            QTRY_VERIFY_WITH_TIMEOUT(!view->isFlicking(), 5000);
+            QVERIFY(qAbs(view->contentY() - 2800) < 1);
+        }
+    }
+    window.resize(390, 844);
+    root->setSize(QSizeF(390, 844));
+    QVERIFY(QQuickTest::qWaitForPolish(&window));
+    QVERIFY(root->property("compact").toBool());
+    for (int curve = 0; curve < 4; ++curve) {
+        QVERIFY(root->setProperty("selectedCurve", curve));
+        QVERIFY(QQuickTest::qWaitForPolish(&window));
+        auto *view = findItem<QQuickFlickable>(root, "curveView" + QString::number(curve));
+        QVERIFY(view);
+        QVERIFY(view->isVisible());
+        QVERIFY(view->width() > 300);
+        QVERIFY(view->height() > 300);
+    }
+    QVERIFY(window.grabWindow().save(QDir::tempPath() + "/qt-flick-curves-phone.png"));
+    QVERIFY(root->setProperty("bezierX1", 0.42));
+    QVERIFY(root->setProperty("bezierY1", 0.0));
+    QVERIFY(root->setProperty("bezierX2", 0.58));
+    QEasingCurve edited(QEasingCurve::BezierSpline);
+    edited.addCubicBezierSegment(QPointF(0.42, 0), QPointF(0.58, 1), QPointF(1, 1));
+    for (int kind = 0; kind < 3; ++kind) {
+        QVERIFY(root->setProperty("viewKind", kind));
+        QVERIFY(QQuickTest::qWaitForPolish(&window));
+        auto *custom = findItem<QQuickFlickable>(root, "curveView2");
+        QVERIFY(custom);
+        QCOMPARE(custom->flickEasing(), edited);
+        const auto oldCurve = findItem<QQuickFlickable>(root, "curveView0")->flickEasing();
+        QCOMPARE(oldCurve.type(), QEasingCurve::OutQuad);
+        QCOMPARE(oldCurve.valueForProgress(0.5), 0.75);
+    }
+    QVERIFY(root->setProperty("selectedCurve", 2));
+    QVERIFY(QQuickTest::qWaitForPolish(&window));
+    auto *editButton = findItem<QQuickItem>(root, "editBezierButton");
+    QVERIFY(editButton);
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                     editButton->mapToScene(QPointF(editButton->width() / 2,
+                                                   editButton->height() / 2)).toPoint());
+    QTRY_VERIFY(root->property("editorVisible").toBool());
+    QVERIFY(QQuickTest::qWaitForPolish(&window));
+    QVERIFY(window.grabWindow().save(QDir::tempPath() + "/qt-flick-bezier-editor-phone.png"));
+    QVERIFY(QMetaObject::invokeMethod(root, "resetBezier"));
+    QEasingCurve original(QEasingCurve::BezierSpline);
+    original.addCubicBezierSegment(QPointF(0.16, 1), QPointF(0.3, 1), QPointF(1, 1));
+    QCOMPARE(findItem<QQuickFlickable>(root, "curveView2")->flickEasing(), original);
+    QTest::keyClick(&window, Qt::Key_Escape);
+    QTRY_VERIFY(!root->property("editorVisible").toBool());
+    auto *resetButton = findItem<QQuickItem>(root, "resetPhysicsButton");
+    QVERIFY(resetButton);
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                     resetButton->mapToScene(QPointF(resetButton->width() / 2,
+                                                    resetButton->height() / 2)).toPoint());
+    const QQuickFlickable defaults;
+    QCOMPARE(root->property("launchVelocity").toReal(), defaults.maximumFlickVelocity());
+    QCOMPARE(root->property("deceleration").toReal(), defaults.flickDeceleration());
+    for (int kind = 0; kind < 3; ++kind) {
+        QVERIFY(root->setProperty("viewKind", kind));
+        QVERIFY(QQuickTest::qWaitForPolish(&window));
+        auto *view = findItem<QQuickFlickable>(root, "curveView2");
+        QVERIFY(view);
+        QCOMPARE(view->maximumFlickVelocity(), defaults.maximumFlickVelocity());
+        QCOMPARE(view->flickDeceleration(), defaults.flickDeceleration());
+    }
+    auto *expandedView = findItem<QQuickFlickable>(root, "curveView2");
+    const qreal originalPosition = expandedView->contentY();
+    const auto doubleTap = [&window](QQuickItem *item) {
+        const QPoint center = item->mapToScene(QPointF(item->width() / 2,
+                                                       item->height() / 2)).toPoint();
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, center, 20);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, center, 20);
+    };
+    doubleTap(expandedView);
+    QTRY_VERIFY(root->property("expanded").toBool());
+    QVERIFY(QQuickTest::qWaitForPolish(&window));
+    QCOMPARE(expandedView, findItem<QQuickFlickable>(root, "curveView2"));
+    QCOMPARE(expandedView->contentY(), originalPosition);
+    QVERIFY(expandedView->height() > 800);
+    QVERIFY(window.grabWindow().save(QDir::tempPath() + "/qt-flick-expanded-phone.png"));
+    doubleTap(expandedView);
+    QTRY_VERIFY(!root->property("expanded").toBool());
+    QVERIFY(QQuickTest::qWaitForPolish(&window));
+    QVERIFY(expandedView->height() < 600);
+    QCOMPARE(expandedView->contentY(), originalPosition);
+    QCOMPARE(warnings.size(), 0);
 }
 
 void tst_qquickflickable::pressDelay_data()

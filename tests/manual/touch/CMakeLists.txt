@@ -20,6 +20,7 @@ qt_internal_add_manual_test(tst_manual_touch
 # Resources:
 set(qml_resource_files
     "basic-flickable.qml"
+    "flickcurves.qml"
     "flickresize.qml"
     "flicktext.qml"
     "main.qml"
@@ -44,6 +45,18 @@ qt_internal_add_resource(tst_manual_touch "qml"
         "/"
     FILES
         ${qml_resource_files}
+)
+
+set(photo_dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../examples/quick/views/listview/content/pics")
+qt_internal_add_resource(tst_manual_touch "flickcurves_photos"
+    PREFIX "/examples/quick/views/listview/content/pics"
+    BASE "${photo_dir}"
+    FILES
+        "${photo_dir}/lemonade.jpg"
+        "${photo_dir}/fruit-salad.jpg"
+        "${photo_dir}/hamburger.jpg"
+        "${photo_dir}/vegetable-soup.jpg"
+        "${photo_dir}/pancakes.jpg"
 )
 
 set(quick_shared_resource_files

@@ -1108,7 +1108,7 @@ bool QQuickGridViewPrivate::flick(AxisData &data, qreal minExtent, qreal maxExte
             overshootDist = overShoot ? overShootDistance(vSize) : 0;
         }
         timeline.reset(data.move);
-        timeline.accel(data.move, v, accel, maxDistance + overshootDist);
+        animateFlick(data, v, accel, maxDistance + overshootDist);
         timeline.callback(QQuickTimeLineCallback(&data.move, fixupCallback, this));
         return true;
     } else {

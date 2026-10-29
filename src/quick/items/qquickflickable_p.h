@@ -19,6 +19,7 @@
 
 #include "qquickitem.h"
 #include <private/qtquickglobal_p.h>
+#include <QtCore/qeasingcurve.h>
 #include <QtCore/qpoint.h>
 
 QT_BEGIN_NAMESPACE
@@ -52,6 +53,7 @@ class Q_QUICK_EXPORT QQuickFlickable : public QQuickItem
     Q_PROPERTY(QQuickTransition *rebound READ rebound WRITE setRebound NOTIFY reboundChanged)
     Q_PROPERTY(qreal maximumFlickVelocity READ maximumFlickVelocity WRITE setMaximumFlickVelocity NOTIFY maximumFlickVelocityChanged)
     Q_PROPERTY(qreal flickDeceleration READ flickDeceleration WRITE setFlickDeceleration NOTIFY flickDecelerationChanged)
+    Q_PROPERTY(QEasingCurve flickEasing READ flickEasing WRITE setFlickEasing RESET resetFlickEasing NOTIFY flickEasingChanged REVISION(6, 12) FINAL)
     Q_PROPERTY(bool moving READ isMoving NOTIFY movingChanged)
     Q_PROPERTY(bool movingHorizontally READ isMovingHorizontally NOTIFY movingHorizontallyChanged)
     Q_PROPERTY(bool movingVertically READ isMovingVertically NOTIFY movingVerticallyChanged)
@@ -164,6 +166,10 @@ public:
     qreal flickDeceleration() const;
     void setFlickDeceleration(qreal);
 
+    QEasingCurve flickEasing() const;
+    void setFlickEasing(const QEasingCurve &easing);
+    void resetFlickEasing();
+
     bool isInteractive() const;
     void setInteractive(bool);
 
@@ -247,6 +253,7 @@ Q_SIGNALS:
     void reboundChanged();
     void maximumFlickVelocityChanged();
     void flickDecelerationChanged();
+    Q_REVISION(6, 12) void flickEasingChanged();
     void pressDelayChanged();
     void movementStarted();
     void movementEnded();

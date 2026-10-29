@@ -237,6 +237,14 @@ private:
     }
 };
 
+static QEasingCurve platformFlickEasing()
+{
+    const QVariant hint = QGuiApplicationPrivate::platformTheme()->themeHint(QPlatformTheme::FlickEasing);
+    if (hint.canConvert<QEasingCurve>())
+        return hint.value<QEasingCurve>();
+    return QEasingCurve(QEasingCurve::OutQuad);
+}
+
 QQuickFlickablePrivate::QQuickFlickablePrivate()
   : contentItem(new QQuickFlickableContentItem)
     , hData(this, &QQuickFlickablePrivate::setViewportX)
@@ -251,6 +259,7 @@ QQuickFlickablePrivate::QQuickFlickablePrivate()
     , lastPressTime(0)
     , deceleration(QGuiApplicationPrivate::platformTheme()->themeHint(QPlatformTheme::FlickDeceleration).toReal())
     , wheelDeceleration(15000)
+    , flickEasing(platformFlickEasing())
     , maxVelocity(QGuiApplicationPrivate::platformTheme()->themeHint(QPlatformTheme::FlickMaximumVelocity).toReal())
     , delayedPressEvent(nullptr), pressDelay(0), fixupDuration(400)
     , flickBoost(1.0), initialWheelFlickDistance(qApp->styleHints()->wheelScrollLines() * 24)
@@ -414,9 +423,9 @@ bool QQuickFlickablePrivate::flick(AxisData &data, qreal minExtent, qreal maxExt
         resetTimeline(data);
         if (!data.inOvershoot) {
             if (boundsBehavior & QQuickFlickable::OvershootBounds)
-                timeline.accel(data.move, v, accel);
+                animateFlick(data, v, accel);
             else
-                timeline.accel(data.move, v, accel, maxDistance);
+                animateFlick(data, v, accel, maxDistance);
         }
         timeline.callback(QQuickTimeLineCallback(&data.move, fixupCallback, this));
 
@@ -430,6 +439,34 @@ bool QQuickFlickablePrivate::flick(AxisData &data, qreal minExtent, qreal maxExt
         fixup(data, minExtent, maxExtent);
         return false;
     }
+}
+
+void QQuickFlickablePrivate::animateFlick(AxisData &data, qreal velocity,
+                                       qreal acceleration, qreal maxDistance)
+{
+    const QEasingCurve easing = q_func()->flickEasing();
+    if (easing.type() == QEasingCurve::OutQuad) {
+        if (maxDistance < 0)
+            timeline.accel(data.move, velocity, acceleration);
+        else
+            timeline.accel(data.move, velocity, acceleration, maxDistance);
+        return;
+    }
+
+    if (!qIsFinite(velocity) || !qIsFinite(acceleration) || acceleration <= 0
+            || qFuzzyIsNull(velocity) || maxDistance == 0)
+        return;
+
+    qreal distance = velocity * velocity / (2 * acceleration);
+    if (maxDistance >= 0)
+        distance = qMin(distance, maxDistance);
+    const qreal duration = 2000 * distance / qAbs(velocity);
+    if (!qIsFinite(distance) || !qIsFinite(duration) || duration < 1
+            || duration > std::numeric_limits<int>::max())
+        return;
+
+    timeline.moveBy(data.move, velocity < 0 ? -distance : distance,
+                    easing, int(duration));
 }
 
 void QQuickFlickablePrivate::fixupY_callback(void *data)
@@ -3222,6 +3259,66 @@ void QQuickFlickable::setFlickDeceleration(qreal deceleration)
         return;
     d->deceleration = qMax(0.001, deceleration);
     emit flickDecelerationChanged();
+}
+
+/*!
+    \qmlproperty easing QtQuick::Flickable::flickEasing
+    \qmlproperty enumeration QtQuick::Flickable::flickEasing.type
+    \qmlproperty real QtQuick::Flickable::flickEasing.amplitude
+    \qmlproperty real QtQuick::Flickable::flickEasing.overshoot
+    \qmlproperty real QtQuick::Flickable::flickEasing.period
+    \qmlproperty list<real> QtQuick::Flickable::flickEasing.bezierCurve
+    \since 6.12
+
+    These properties control the easing curve of a flick. The default curve
+    is provided by the platform plugin when the Flickable is created.
+    The Cocoa and iOS plugins provide an ease-out Bezier curve. Platforms
+    without a specific curve use Easing.OutQuad, which preserves the
+    constant-deceleration behavior.
+    flickDeceleration and the release velocity determine the duration and
+    distance; flickEasing changes the position along that distance over time.
+    Changing this property affects subsequent flicks, not an animation already
+    in progress. Setting it to undefined restores the platform default curve.
+
+    The curve has the same parameters as PropertyAnimation::easing, including
+    custom cubic Bezier splines. For example:
+
+    \qml
+    Flickable {
+        width: 320; height: 480
+        contentHeight: 2000
+        flickEasing.type: Easing.BezierSpline
+        flickEasing.bezierCurve: [0.16, 1, 0.3, 1, 1, 1]
+    }
+    \endqml
+
+    A custom curve does not necessarily preserve the release velocity at the
+    start of the animation. Monotonically increasing ease-out curves are
+    recommended for natural scrolling. Curves such as Easing.OutBack can move
+    past the destination or reverse direction; boundsBehavior still applies.
+    Direct dragging, native touchpad momentum, and rebound transitions are not
+    affected.
+
+    \sa flickDeceleration, maximumFlickVelocity, PropertyAnimation::easing, rebound
+*/
+QEasingCurve QQuickFlickable::flickEasing() const
+{
+    Q_D(const QQuickFlickable);
+    return d->flickEasing;
+}
+
+void QQuickFlickable::setFlickEasing(const QEasingCurve &easing)
+{
+    Q_D(QQuickFlickable);
+    if (d->flickEasing == easing)
+        return;
+    d->flickEasing = easing;
+    emit flickEasingChanged();
+}
+
+void QQuickFlickable::resetFlickEasing()
+{
+    setFlickEasing(platformFlickEasing());
 }
 
 bool QQuickFlickable::isFlicking() const

@@ -147,6 +147,7 @@ public:
                        QQuickTimeLineCallback::Callback fixupCallback,
                        QEvent::Type eventType, qreal velocity);
     void flickingStarted(bool flickingH, bool flickingV);
+    void animateFlick(AxisData &data, qreal velocity, qreal acceleration, qreal maxDistance = -1);
 
     void fixupX();
     void fixupY();
@@ -207,6 +208,7 @@ public:
     QVector2D accumulatedWheelPixelDelta;
     qreal deceleration;
     qreal wheelDeceleration;
+    QEasingCurve flickEasing;
     qreal maxVelocity;
     QPointerEvent *delayedPressEvent;
     QBasicTimer delayedPressTimer;
