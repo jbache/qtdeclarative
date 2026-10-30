@@ -181,6 +181,7 @@ private slots:
     void headerSnapToItem();
     void snapToItemWithSpacing_QTBUG_59852();
     void snapToItemWithSectionAtStart();
+    void snapToItemAfterSection();
     void snapOneItemResize_QTBUG_43555();
     void snapOneItem_data();
     void snapOneItem();
@@ -5660,6 +5661,23 @@ void tst_QQuickListView::snapToItemWithSectionAtStart() // QTBUG-30768
         QQuickTest::pointerFlick(device, &window, 0, start, end, 180);
         QTRY_COMPARE(listView->isMoving(), false); // wait until it stops
         QCOMPARE(int(listView->contentY()) % 30, 0);
+    }
+}
+
+void tst_QQuickListView::snapToItemAfterSection()
+{
+    QQuickView window;
+    QVERIFY(QQuickTest::showView(window, testFileUrl("snapToItemWithSectionAtStart.qml")));
+    QQuickListView *listView = qobject_cast<QQuickListView *>(window.rootObject());
+    QVERIFY(listView);
+
+    // Index 3 starts a section at 120; every position up to the next section must snap.
+    for (int y = 120; y < 210; ++y) {
+        listView->setContentY(y);
+        QVERIFY(QQuickTest::qWaitForPolish(listView));
+        listView->returnToBounds();
+        QVERIFY2(int(listView->contentY()) % 30 == 0,
+                 qPrintable(QStringLiteral("%1 snapped to %2").arg(y).arg(listView->contentY())));
     }
 }
 

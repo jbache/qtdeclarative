@@ -630,7 +630,7 @@ FxViewItem *QQuickListViewPrivate::snapItemAt(qreal pos)
         if (halfwayToNextItem >= pos && halfwayToPrevItem < pos)
             snapItem = item;
 
-        prevItemSize = listItem->itemSize();
+        prevItemSize = itemSize;
         prevItem = item;
     }
     return snapItem;
