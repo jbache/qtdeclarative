@@ -10,6 +10,8 @@ Item {
         anchors.fill: parent
         cellWidth: 64
         cellHeight: 64
+        // Keep model-reload timing independent of the platform's flick model.
+        flickDeceleration: 1500
         model: ListModel {
             id: listModel
 

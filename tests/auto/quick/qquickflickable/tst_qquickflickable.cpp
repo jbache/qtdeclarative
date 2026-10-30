@@ -3,12 +3,15 @@
 
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
+#include <QtCore/qmap.h>
+#include <QtCore/qscopedvaluerollback.h>
 #include <QtQuick/qquickview.h>
 #include <QtQuickTest/QtQuickTest>
 #include <QtGui/QStyleHints>
 #include <QtQml/qqmlengine.h>
 #include <QtQml/qqmlcomponent.h>
 #include <private/qguiapplication_p.h>
+#include <private/qeventpoint_p.h>
 #include <private/qquickflickable_p.h>
 #include <private/qquickflickable_p_p.h>
 #include <private/qquickmousearea_p.h>
@@ -17,6 +20,7 @@
 #include <private/qquicktaphandler_p.h>
 #include <math.h>
 #include <QtGui/qpa/qplatformintegration.h>
+#include <QtGui/qpa/qplatformtheme.h>
 #include <QtQuickTestUtils/private/qmlutils_p.h>
 #include <QtQuickTestUtils/private/geometrytestutils_p.h>
 #include <QtQuickTestUtils/private/viewtestutils_p.h>
@@ -28,6 +32,29 @@ Q_LOGGING_CATEGORY(lcTests, "qt.quick.tests")
 
 using namespace QQuickViewTestUtils;
 using namespace QQuickVisualTestUtils;
+
+class FlickTimeLineTestAccess : public QQuickTimeLine
+{
+public:
+    static void advance(QQuickTimeLine &timeline, int time)
+    {
+        const auto update = &FlickTimeLineTestAccess::updateCurrentTime;
+        (timeline.*update)(time);
+    }
+};
+
+class FlickTheme : public QPlatformTheme
+{
+public:
+    const QPlatformTheme *base = QGuiApplicationPrivate::platformTheme();
+    QMap<ThemeHint, QVariant> hints;
+
+    QVariant themeHint(ThemeHint hint) const override
+    {
+        const auto value = hints.constFind(hint);
+        return value == hints.cend() ? base->themeHint(hint) : value.value();
+    }
+};
 
 // an abstract Slider which only handles touch events
 class TouchDragArea : public QQuickItem
@@ -167,6 +194,12 @@ private slots:
     void rebound();
     void maximumFlickVelocity();
     void flickDeceleration();
+    void constantDeceleration();
+    void platformFlickMotion();
+    void flickDecayTimeline();
+    void flickDecayRebound();
+    void flickMotionTrajectory_data();
+    void flickMotionTrajectory();
     void pressDelay_data();
     void pressDelay();
     void nestedPressDelay();
@@ -193,6 +226,10 @@ private slots:
     void dragWhileFlicking();
     void disabled();
     void flickVelocity();
+    void flickBoost_data();
+    void flickBoost();
+    void platformFlickBoost_data();
+    void platformFlickBoost();
     void margins();
     void cancelOnHide();
     void cancelOnMouseGrab();
@@ -234,6 +271,7 @@ private slots:
     void setContentPositionWhileDragging();
     void coalescedMove();
     void onlyOneMove();
+    void proportionalWheelScrolling_data();
     void proportionalWheelScrolling();
     void touchCancel();
     void pixelAlignedEndPoints();
@@ -289,7 +327,8 @@ void tst_qquickflickable::create()
     QCOMPARE(obj->isInteractive(), true);
     QCOMPARE(obj->boundsBehavior(), QQuickFlickable::DragAndOvershootBounds);
     QCOMPARE(obj->pressDelay(), 0);
-    QCOMPARE(obj->maximumFlickVelocity(), 2500.);
+    QCOMPARE(obj->maximumFlickVelocity(), QGuiApplicationPrivate::platformTheme()
+             ->themeHint(QPlatformTheme::FlickMaximumVelocity).toReal());
 
     delete obj;
 }
@@ -504,6 +543,12 @@ void tst_qquickflickable::rebound()
 
 void tst_qquickflickable::maximumFlickVelocity()
 {
+    QQuickFlickable defaults;
+    const qreal platformMaximum = QGuiApplicationPrivate::platformTheme()
+            ->themeHint(QPlatformTheme::FlickMaximumVelocity).toReal();
+    QCOMPARE(defaults.maximumFlickVelocity(), platformMaximum);
+    QCOMPARE(QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickMaximumVelocity).toReal(),
+             10000);
     QQmlEngine engine;
     QQmlComponent component(&engine);
     component.setData("import QtQuick 2.0; Flickable { maximumFlickVelocity: 1.0; }", QUrl::fromLocalFile(""));
@@ -524,6 +569,16 @@ void tst_qquickflickable::maximumFlickVelocity()
 
 void tst_qquickflickable::flickDeceleration()
 {
+    QQuickFlickable defaults;
+    auto *priv = QQuickFlickablePrivate::get(&defaults);
+    QCOMPARE(priv->flickMode, QQuickFlickablePrivate::ExponentialDecay);
+    const auto reboundMode = priv->flickReboundMode;
+    QSignalSpy defaultSpy(&defaults, &QQuickFlickable::flickDecelerationChanged);
+    defaults.setFlickDeceleration(defaults.flickDeceleration());
+    QCOMPARE(priv->flickMode, QQuickFlickablePrivate::ConstantDeceleration);
+    QCOMPARE(priv->flickReboundMode, reboundMode);
+    QCOMPARE(defaultSpy.size(), 0);
+
     QQmlEngine engine;
     QQmlComponent component(&engine);
     component.setData("import QtQuick 2.0; Flickable { flickDeceleration: 1.0; }", QUrl::fromLocalFile(""));
@@ -532,6 +587,8 @@ void tst_qquickflickable::flickDeceleration()
 
     QVERIFY(flickable);
     QCOMPARE(flickable->flickDeceleration(), 1.0);
+    QCOMPARE(QQuickFlickablePrivate::get(flickable)->flickMode,
+             QQuickFlickablePrivate::ConstantDeceleration);
 
     flickable->setFlickDeceleration(2.0);
     QCOMPARE(flickable->flickDeceleration(), 2.0);
@@ -540,6 +597,255 @@ void tst_qquickflickable::flickDeceleration()
     QCOMPARE(spy.size(),1);
 
     delete flickable;
+
+    component.setData("import QtQuick; Item { Flickable { id: defaults }"
+                      "Flickable { objectName: 'configured';"
+                      "flickDeceleration: defaults.flickDeceleration } }", QUrl());
+    QScopedPointer<QObject> object(component.create());
+    QVERIFY2(object, qPrintable(component.errorString()));
+    auto *configured = object->findChild<QQuickFlickable *>("configured");
+    QVERIFY(configured);
+    QCOMPARE(configured->flickDeceleration(), defaults.flickDeceleration());
+    QCOMPARE(QQuickFlickablePrivate::get(configured)->flickMode,
+             QQuickFlickablePrivate::ConstantDeceleration);
+}
+
+void tst_qquickflickable::constantDeceleration()
+{
+    for (qreal velocity : {-987.0, 987.0}) {
+        for (qreal limit : {-1.0, 100.0}) {
+            QQuickFlickable flickable;
+            flickable.setFlickDeceleration(flickable.flickDeceleration());
+            auto *priv = QQuickFlickablePrivate::get(&flickable);
+            QQuickFlickable legacyFlickable;
+            auto *legacyPriv = QQuickFlickablePrivate::get(&legacyFlickable);
+            auto &legacy = legacyPriv->timeline;
+            auto &position = legacyPriv->vData.move;
+            priv->animateFlick(priv->vData, velocity, 1000, limit);
+            if (limit < 0)
+                legacy.accel(position, velocity, 1000);
+            else
+                legacy.accel(position, velocity, 1000, limit);
+            for (int time : {0, 100, 202, 1000}) {
+                FlickTimeLineTestAccess::advance(priv->timeline, time);
+                FlickTimeLineTestAccess::advance(legacy, time);
+                QCOMPARE(priv->vData.move.value(), position.value());
+            }
+        }
+    }
+}
+
+void tst_qquickflickable::platformFlickMotion()
+{
+    QCOMPARE(QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickDecayRate).toReal(), 0.998);
+    QCOMPARE(QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickBoostVelocityThreshold).toReal(),
+             800);
+    QCOMPARE(QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickBoostInterval).toInt(), 800);
+    QCOMPARE(QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickBoostIncrement).toReal(), 0.4);
+    for (qreal hint : {-1.0, 0.0, 0.99, -0.5, 1.0, qInf(), qQNaN()}) {
+        FlickTheme theme;
+        theme.hints[QPlatformTheme::FlickDecayRate] = hint;
+        QScopedValueRollback<QPlatformTheme *> restoreTheme(QGuiApplicationPrivate::platform_theme,
+                                                            &theme);
+        QQuickFlickable flickable;
+        auto *priv = QQuickFlickablePrivate::get(&flickable);
+        const bool validRate = qIsFinite(hint) && hint > 0 && hint < 1;
+        QCOMPARE(priv->flickMode, hint == -1 ? QQuickFlickablePrivate::ConstantDeceleration
+                                            : QQuickFlickablePrivate::ExponentialDecay);
+        QCOMPARE(priv->flickDecayRate, validRate ? hint : 0.998);
+        QCOMPARE(priv->flickReboundMode, validRate ? QQuickFlickablePrivate::ReboundCriticalSpring
+                                                  : QQuickFlickablePrivate::ReboundFixedDuration);
+        if (validRate) {
+            priv->animateFlick(priv->vData, 1000, 900);
+            FlickTimeLineTestAccess::advance(priv->timeline, 0);
+            FlickTimeLineTestAccess::advance(priv->timeline, 100);
+            const qreal coefficient = -1000 * qLn(hint);
+            const qreal expected = 1000 / coefficient * (1 - qExp(-coefficient * 0.1));
+            QVERIFY(qAbs(priv->vData.move.value() - expected) < 0.000001);
+
+            QQmlEngine engine;
+            QQmlComponent component(&engine);
+            component.setData("import QtQuick; Flickable {}", QUrl());
+            QScopedPointer<QObject> object(component.create());
+            QVERIFY2(object, qPrintable(component.errorString()));
+            auto *qmlFlickable = qobject_cast<QQuickFlickable *>(object.data());
+            QVERIFY(qmlFlickable);
+            QCOMPARE(QQuickFlickablePrivate::get(qmlFlickable)->flickMode,
+                     QQuickFlickablePrivate::ExponentialDecay);
+            QCOMPARE(QQuickFlickablePrivate::get(qmlFlickable)->flickDecayRate, hint);
+        }
+        flickable.setFlickDeceleration(flickable.flickDeceleration());
+        QCOMPARE(priv->flickMode, QQuickFlickablePrivate::ConstantDeceleration);
+        QCOMPARE(priv->flickReboundMode, validRate ? QQuickFlickablePrivate::ReboundCriticalSpring
+                                                  : QQuickFlickablePrivate::ReboundFixedDuration);
+    }
+}
+
+void tst_qquickflickable::flickDecayRebound()
+{
+    for (qreal position : {-120.0, 120.0}) {
+        QQuickFlickable flickable;
+        auto *priv = QQuickFlickablePrivate::get(&flickable);
+        priv->flickReboundMode = QQuickFlickablePrivate::ReboundCriticalSpring;
+        priv->vData.move.setValue(position);
+        priv->fixupMode = QQuickFlickablePrivate::Normal;
+        priv->adjustContentPos(priv->vData, 0);
+        QVERIFY(priv->timeline.isActive());
+        qreal previous = qAbs(position);
+        for (int time : {0, 8, 16, 100, 200, 400, 600}) {
+            FlickTimeLineTestAccess::advance(priv->timeline, time);
+            const qreal phase = 12.0 * time / 1000;
+            const qreal expected = position * (1 + phase) * qExp(-phase);
+            const qreal actual = priv->vData.move.value();
+            QVERIFY(qAbs(actual - expected) < 0.000001);
+            QVERIFY(actual * position >= 0);
+            QVERIFY(qAbs(actual) <= previous);
+            previous = qAbs(actual);
+        }
+        QVERIFY(priv->timeline.isActive());
+        FlickTimeLineTestAccess::advance(priv->timeline, 1000);
+        QCOMPARE(priv->vData.move.value(), 0);
+        QVERIFY(!priv->timeline.isActive());
+    }
+}
+
+void tst_qquickflickable::flickDecayTimeline()
+{
+    for (qreal rate : {0.998, 0.99}) {
+        for (qreal velocity : {-1000.0, 1000.0}) {
+            for (qreal limit : {-1.0, 100.0}) {
+                QQuickFlickable flickable;
+                auto *priv = QQuickFlickablePrivate::get(&flickable);
+                const int duration = priv->timeline.decay(priv->vData.move, velocity, rate, 1, limit);
+                QVERIFY(duration > 0);
+                const qreal coefficient = -1000 * qLn(rate);
+                const qreal expectedDuration = limit < 0
+                    || limit >= (qAbs(velocity) - 1) / coefficient
+                        ? 1000 * qLn(qAbs(velocity)) / coefficient
+                        : -1000 * qLn(1 - limit * coefficient / qAbs(velocity)) / coefficient;
+                QCOMPARE(duration, qCeil(expectedDuration));
+                for (int time : {0, duration / 2, duration}) {
+                    FlickTimeLineTestAccess::advance(priv->timeline, time);
+                    qreal expected = velocity / coefficient * (1 - qExp(-coefficient * time / 1000));
+                    if (limit >= 0)
+                        expected = qBound(-limit, expected, limit);
+                    QVERIFY(qAbs(priv->vData.move.value() - expected) < 0.000001);
+                }
+            }
+        }
+    }
+}
+
+void tst_qquickflickable::flickMotionTrajectory_data()
+{
+    QTest::addColumn<QByteArray>("view");
+    QTest::addColumn<int>("motionModel");
+    QTest::addColumn<bool>("horizontal");
+    QTest::addColumn<bool>("backwards");
+    QTest::addColumn<bool>("wheel");
+
+    const QList<QByteArray> views = {"Flickable", "ListView", "GridView",
+                                   "ListViewSnap", "GridViewSnap"};
+    for (const auto &view : views) {
+        for (const int model : { int(QQuickFlickablePrivate::ConstantDeceleration),
+                     int(QQuickFlickablePrivate::ExponentialDecay) }) {
+            for (bool horizontal : {false, true}) {
+                for (bool backwards : {false, true}) {
+                    const QByteArray name = view + '-' + QByteArray::number(model)
+                            + (horizontal ? "-horizontal" : "-vertical")
+                            + (backwards ? "-backwards" : "-forwards");
+                    QTest::newRow(name.constData())
+                            << view << int(model) << horizontal << backwards << false;
+                    QTest::newRow((name + "-wheel").constData())
+                            << view << int(model) << horizontal << backwards << true;
+                }
+            }
+        }
+    }
+}
+
+void tst_qquickflickable::flickMotionTrajectory()
+{
+    QFETCH(QByteArray, view);
+    QFETCH(int, motionModel);
+    QFETCH(bool, horizontal);
+    QFETCH(bool, backwards);
+    QFETCH(bool, wheel);
+
+    QByteArray source = "import QtQuick 6.12; ";
+    if (view == "Flickable") {
+        source += "Flickable { contentWidth: 100000; contentHeight: 100000;";
+    } else if (view.startsWith("ListView")) {
+        source += "ListView { model: 1000; delegate: Item { width: 100; height: 100 } ";
+        if (horizontal)
+            source += "orientation: ListView.Horizontal;";
+        if (view.endsWith("Snap"))
+            source += "snapMode: ListView.SnapToItem;";
+    } else {
+        source += "GridView { model: 1000; cellWidth: 100; cellHeight: 100;"
+                  "delegate: Item { width: 100; height: 100 } ";
+        if (horizontal)
+            source += "flow: GridView.FlowTopToBottom;";
+        if (view.endsWith("Snap"))
+            source += "snapMode: GridView.SnapToRow;";
+    }
+    source += "width: 200; height: 200; boundsBehavior: Flickable.StopAtBounds;";
+    if (motionModel == QQuickFlickablePrivate::ConstantDeceleration)
+        source += "flickDeceleration: 1000;";
+    source += '}';
+
+    FlickTheme theme;
+    if (motionModel == QQuickFlickablePrivate::ExponentialDecay)
+        theme.hints[QPlatformTheme::FlickDecayRate] = 0.998;
+    QScopedValueRollback<QPlatformTheme *> restoreTheme(QGuiApplicationPrivate::platform_theme,
+                                                        &theme);
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(source, QUrl());
+    QQuickWindow window;
+    window.resize(200, 200);
+    QScopedPointer<QObject> object(component.create());
+    QVERIFY2(object, qPrintable(component.errorString()));
+    auto *flickable = qobject_cast<QQuickFlickable *>(object.data());
+    QVERIFY(flickable);
+    flickable->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(QQuickTest::qWaitForPolish(flickable));
+    if (horizontal)
+        flickable->setContentX(1000);
+    else
+        flickable->setContentY(1000);
+    auto *priv = QQuickFlickablePrivate::get(flickable);
+    const bool useDecay = !wheel && priv->flickMode == QQuickFlickablePrivate::ExponentialDecay;
+    const qreal velocity = backwards ? 1000 : -1000;
+    if (wheel) {
+        priv->wheelDeceleration = 1000;
+        QVERIFY(horizontal ? priv->flickX(QEvent::Wheel, velocity)
+                           : priv->flickY(QEvent::Wheel, velocity));
+        priv->flickingStarted(horizontal, !horizontal);
+    } else {
+        flickable->flick(horizontal ? velocity : 0, horizontal ? 0 : velocity);
+    }
+    QCOMPARE(int(priv->flickMode), motionModel);
+    QVERIFY(flickable->isFlicking());
+    FlickTimeLineTestAccess::advance(priv->timeline, 0);
+    FlickTimeLineTestAccess::advance(priv->timeline, 500);
+    const qreal direction = backwards ? -1 : 1;
+    const qreal coefficient = useDecay && view.endsWith("Snap") ? 999.0 / 500
+                                                             : -1000 * qLn(0.998);
+    const qreal expected = useDecay
+        ? 1000 + direction * 1000 / coefficient * (1 - qExp(-coefficient * 0.5))
+        : 1000 + direction * 375;
+    const qreal actual = horizontal ? flickable->contentX() : flickable->contentY();
+    QVERIFY2(qAbs(actual - expected) < 0.01,
+             qPrintable(QString("actual %1, expected %2").arg(actual).arg(expected)));
+    const int duration = useDecay ? qCeil(1000 * qLn(1000.0) / coefficient) : 1000;
+    FlickTimeLineTestAccess::advance(priv->timeline, duration);
+    const qreal distance = useDecay ? 999 / coefficient : 500;
+    QVERIFY(qAbs((horizontal ? flickable->contentX() : flickable->contentY())
+                 - (1000 + direction * distance)) < 0.002);
+    flickable->cancelFlick();
 }
 
 void tst_qquickflickable::pressDelay_data()
@@ -650,6 +956,7 @@ void tst_qquickflickable::nestedPressDelay()
 
     QQuickFlickable *inner = window.rootObject()->findChild<QQuickFlickable*>("innerFlickable");
     QVERIFY(inner != nullptr);
+    QQuickFlickablePrivate::get(inner)->flickDecayRate = 0.95;
 
     QQuickTest::pointerMoveAndPress(device, &window, 0, QPoint(150, 150));
     // the MouseArea is not pressed immediately
@@ -1299,7 +1606,7 @@ void tst_qquickflickable::movingAndFlicking()
     QCOMPARE(flickStartSpy.size(), 1);
 
     // wait for any motion to end
-    QTRY_VERIFY(!flickable->isMoving());
+    QTRY_VERIFY_WITH_TIMEOUT(!flickable->isMoving(), 5s);
 
     QVERIFY(!flickable->isMovingHorizontally());
     QVERIFY(!flickable->isMovingVertically());
@@ -1474,7 +1781,7 @@ void tst_qquickflickable::movingAndDragging()
     // Don't test whether moving finished because a flick could occur
 
     // wait for any motion to end
-    QTRY_VERIFY(!flickable->isMoving());
+    QTRY_VERIFY_WITH_TIMEOUT(!flickable->isMoving(), 5s);
 
     QVERIFY(!flickable->isMovingHorizontally());
     QVERIFY(!flickable->isMovingVertically());
@@ -1677,7 +1984,7 @@ void tst_qquickflickable::flickOnRelease()
     QCOMPARE(vFlickSpy.size(), 1);
 
     // wait for any motion to end
-    QTRY_VERIFY(!flickable->isMoving());
+    QTRY_VERIFY_WITH_TIMEOUT(!flickable->isMoving(), 5s);
 
     // Stop on a full pixel after user interaction
     QCOMPARE(flickable->contentY(), (qreal)qRound(flickable->contentY()));
@@ -1830,6 +2137,193 @@ void tst_qquickflickable::disabled()
     QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, QPoint(50, 10));
 
     QTRY_VERIFY(window.rootObject()->property("clicked").toBool());
+}
+
+void tst_qquickflickable::flickBoost_data()
+{
+    QTest::addColumn<QByteArray>("view");
+    QTest::addColumn<bool>("horizontal");
+    QTest::addColumn<bool>("exponential");
+    for (const QByteArray &view : {QByteArray("Flickable"), QByteArray("ListView"), QByteArray("GridView")}) {
+        for (bool horizontal : {false, true}) {
+            for (bool exponential : {false, true}) {
+                const QByteArray name = view + (horizontal ? "-horizontal" : "-vertical")
+                        + (exponential ? "-exponential" : "-constant");
+                QTest::newRow(name.constData()) << view << horizontal << exponential;
+            }
+        }
+    }
+}
+
+void tst_qquickflickable::flickBoost()
+{
+    QFETCH(QByteArray, view);
+    QFETCH(bool, horizontal);
+    QFETCH(bool, exponential);
+    QByteArray source = "import QtQuick 6.12; " + view + " { width: 600; height: 600;";
+    if (view == "Flickable") {
+        source += "contentWidth: 100000; contentHeight: 100000;";
+    } else {
+        source += "model: 2000; delegate: Item { width: 100; height: 100 } ";
+        if (view == "ListView" && horizontal)
+            source += "orientation: ListView.Horizontal;";
+        if (view == "GridView") {
+            source += "cellWidth: 100; cellHeight: 100;";
+            if (horizontal)
+                source += "flow: GridView.FlowTopToBottom;";
+        }
+    }
+    source += "maximumFlickVelocity: 20000;";
+    if (!exponential)
+        source += "flickDeceleration: 1500;";
+    source += '}';
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(source, QUrl());
+    QScopedPointer<QObject> object(component.create());
+    QVERIFY2(object, qPrintable(component.errorString()));
+    auto *flickable = qobject_cast<QQuickFlickable *>(object.data());
+    QVERIFY(flickable);
+    QQuickWindow window;
+    window.resize(600, 600);
+    flickable->setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(QQuickTest::qWaitForPolish(flickable));
+    if (horizontal)
+        flickable->setContentX(10000);
+    else
+        flickable->setContentY(10000);
+    auto *priv = QQuickFlickablePrivate::get(flickable);
+    const QPoint start = horizontal ? QPoint(550, 50) : QPoint(50, 550);
+    const QPoint end = horizontal ? QPoint(100, 50) : QPoint(50, 100);
+    qreal initialVelocity = 0;
+    for (int gesture = 0; gesture < 4; ++gesture) {
+        QQuickTest::pointerFlick(touchscreen.get(), &window, 0, start, end, 100);
+        QVERIFY(flickable->isFlicking());
+        const qreal velocity = horizontal ? flickable->horizontalVelocity() : flickable->verticalVelocity();
+        QVERIFY(velocity > 0);
+        if (gesture == 0)
+            initialVelocity = velocity;
+    }
+    QVERIFY(priv->flickBoost > 1);
+    const qreal boostedVelocity = horizontal ? flickable->horizontalVelocity() : flickable->verticalVelocity();
+    QVERIFY2(boostedVelocity > initialVelocity * 1.1,
+             qPrintable(QString("initial %1, boosted %2").arg(initialVelocity).arg(boostedVelocity)));
+    QQuickTest::pointerFlick(touchscreen.get(), &window, 0, end, start, 100);
+    QTRY_VERIFY((horizontal ? flickable->horizontalVelocity() : flickable->verticalVelocity()) < 0);
+    QCOMPARE(priv->flickBoost, 1);
+}
+
+void tst_qquickflickable::platformFlickBoost_data()
+{
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("mouse");
+    QTest::addColumn<int>("hintKind");
+    QTest::addColumn<bool>("slowFlick");
+    QTest::addColumn<int>("interval");
+    QTest::addColumn<qreal>("expectedBoost");
+    // Boost tuning follows the platform alone, not the selected mode or device.
+    for (int hintKind : {0, 1, 2}) {
+        const bool custom = hintKind == 1;
+        const qreal threshold = custom ? 1250 : 800;
+        const int resetInterval = custom ? 600 : 800;
+        const qreal increment = custom ? 0.25 : 0.4;
+        for (const int mode : { int(QQuickFlickablePrivate::ExponentialDecay),
+                    int(QQuickFlickablePrivate::ConstantDeceleration) }) {
+            for (bool mouse : {false, true}) {
+                for (bool slow : {false, true}) {
+                    for (int interval : {0, 350, 500, 700, 850}) {
+                        const qreal speed = slow ? 1000 : 2000;
+                        const qreal expected = interval > resetInterval || speed <= threshold ? 1
+                                : 2 - (interval > resetInterval / 2 ? 0.5 : 0) + increment;
+                        const char *profile = custom ? "custom" : hintKind ? "invalid" : "generic";
+                        const QByteArray name = QByteArray(profile)
+                                + '-' + QByteArray::number(mode) + (mouse ? "-mouse" : "-touch")
+                                + (slow ? "-thumb-" : "-fast-") + QByteArray::number(interval);
+                        QTest::newRow(name.constData()) << mode << mouse << hintKind << slow
+                                                        << interval << expected;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void tst_qquickflickable::platformFlickBoost()
+{
+    QFETCH(int, mode);
+    QFETCH(bool, mouse);
+    QFETCH(int, hintKind);
+    QFETCH(bool, slowFlick);
+    QFETCH(int, interval);
+    QFETCH(qreal, expectedBoost);
+
+    FlickTheme theme;
+    const bool custom = hintKind == 1;
+    theme.hints = { { QPlatformTheme::FlickDecayRate,
+                      mode == QQuickFlickablePrivate::ConstantDeceleration ? -1.0 : 0.998 },
+                    { QPlatformTheme::FlickBoostVelocityThreshold, custom ? 1250 : 800 },
+                    { QPlatformTheme::FlickBoostInterval, custom ? 600 : 800 },
+                    { QPlatformTheme::FlickBoostIncrement, custom ? 0.25 : 0.4 } };
+    if (hintKind == 2) {
+        // Invalid hints must fall back to the generic defaults.
+        theme.hints[QPlatformTheme::FlickBoostVelocityThreshold] = qQNaN();
+        theme.hints[QPlatformTheme::FlickBoostInterval] = -1;
+        theme.hints[QPlatformTheme::FlickBoostIncrement] = qInf();
+    }
+    QScopedValueRollback<QPlatformTheme *> restoreTheme(QGuiApplicationPrivate::platform_theme, &theme);
+
+    QQuickWindow window;
+    window.resize(600, 600);
+    QQuickFlickable flickable;
+    flickable.setSize(QSizeF(600, 600));
+    flickable.setContentHeight(100000);
+    flickable.setContentY(10000);
+    flickable.setMaximumFlickVelocity(10000);
+    flickable.setParentItem(window.contentItem());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *priv = QQuickFlickablePrivate::get(&flickable);
+    QCOMPARE(int(priv->flickMode), mode);
+    const auto *device = mouse ? mouseDevice.get() : touchscreen.get();
+    flickable.flick(0, -4000);
+    QVERIFY(flickable.isFlicking());
+    FlickTimeLineTestAccess::advance(priv->timeline, 0);
+    FlickTimeLineTestAccess::advance(priv->timeline, interval);
+    QCOMPARE(priv->timeline.time(), interval);
+    priv->vData.smoothVelocity.setValue(4000);
+    priv->flickBoost = 2;
+    const qreal releaseVelocity = slowFlick ? -1000 : -2000;
+    const auto pointerEvent = [&](bool pressed) -> std::unique_ptr<QPointerEvent> {
+        const QPointF position(50, pressed ? 550 : 150);
+        const QPointF globalPosition = window.mapToGlobal(position);
+        std::unique_ptr<QPointerEvent> event;
+        if (mouse) {
+            event = std::make_unique<QMouseEvent>(pressed ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
+                    position, globalPosition, Qt::LeftButton, pressed ? Qt::LeftButton : Qt::NoButton,
+                    Qt::NoModifier, device);
+        } else {
+            event = std::make_unique<QTouchEvent>(pressed ? QEvent::TouchBegin : QEvent::TouchEnd,
+                    device, Qt::NoModifier, QList<QEventPoint>{QEventPoint(0,
+                        pressed ? QEventPoint::State::Pressed : QEventPoint::State::Released,
+                        position, globalPosition)});
+        }
+        QMutableEventPoint::setPosition(event->point(0), position);
+        QMutableEventPoint::setGlobalPressPosition(event->point(0), window.mapToGlobal(QPointF(50, 550)));
+        QMutableEventPoint::setVelocity(event->point(0), QVector2D(0, releaseVelocity));
+        event->setTimestamp(pressed ? 1000 : 1100);
+        return event;
+    };
+    auto press = pointerEvent(true);
+    priv->handlePressEvent(press.get());
+    for (int sample = 0; sample < 10; ++sample)
+        priv->vData.addVelocitySample(releaseVelocity, flickable.maximumFlickVelocity());
+    priv->lastPosTime = 1050;
+    auto release = pointerEvent(false);
+    priv->handleReleaseEvent(release.get());
+    QCOMPARE(priv->flickBoost, expectedBoost);
+    QCOMPARE(flickable.maximumFlickVelocity(), 10000);
 }
 
 void tst_qquickflickable::flickVelocity()
@@ -2039,7 +2533,7 @@ void tst_qquickflickable::flickTwiceUsingTouches()
     qDebug() << "contentYAfterFirstFlick " << contentYAfterFirstFlick;
     QVERIFY(contentYAfterFirstFlick > 50.0f);
     // Wait until view stops moving
-    QTRY_VERIFY_WITH_TIMEOUT(!flickable->isMoving(), 3s);
+    QTRY_VERIFY_WITH_TIMEOUT(!flickable->isMoving(), 5s);
 
     QQuickTest::pointerFlick(touchscreen.get(), &window, 1, QPoint(100, 400), QPoint(100, 240), 100);
 
@@ -2510,6 +3004,7 @@ void tst_qquickflickable::movementFromProgrammaticFlick()
 
     QQuickFlickable *flickable = qobject_cast<QQuickFlickable*>(window.rootObject());
     QVERIFY(flickable != nullptr);
+    QQuickFlickablePrivate::get(flickable)->flickDecayRate = 0.95;
 
     // verify that the signals for movement and flicking are called in the right order
     flickable->flick(0, -1000);
@@ -3396,12 +3891,30 @@ void tst_qquickflickable::onlyOneMove()
     QCOMPARE(flickEndedSpy.size(), 1);
 }
 
+void tst_qquickflickable::proportionalWheelScrolling_data()
+{
+    QTest::addColumn<qreal>("wheelDeceleration");
+    QTest::addColumn<bool>("legacy");
+    QTest::newRow("proportional-default") << qreal(15000) << false;
+    QTest::newRow("proportional-legacy") << qreal(15000) << true;
+    QTest::newRow("accelerated-default") << qreal(10000) << false;
+    QTest::newRow("accelerated-legacy") << qreal(10000) << true;
+}
+
 void tst_qquickflickable::proportionalWheelScrolling() // QTBUG-106338 etc.
 {
+    QFETCH(qreal, wheelDeceleration);
+    QFETCH(bool, legacy);
     QQuickView window;
     QVERIFY(QQuickTest::showView(window, testFileUrl("wheel.qml")));
     QQuickFlickable *flickable = window.rootObject()->findChild<QQuickFlickable *>();
     QVERIFY(flickable);
+    auto *priv = QQuickFlickablePrivate::get(flickable);
+    priv->wheelDeceleration = wheelDeceleration;
+    if (legacy)
+        flickable->setFlickDeceleration(flickable->flickDeceleration());
+    else
+        priv->flickMode = QQuickFlickablePrivate::ExponentialDecay;
 
     QVERIFY(!flickable->property("ended").value<bool>());
 
@@ -3418,18 +3931,10 @@ void tst_qquickflickable::proportionalWheelScrolling() // QTBUG-106338 etc.
     QTRY_VERIFY(!flickable->isMovingVertically());
 
     // The current movement formula being used is: delta / 120 * wheelScrollLines * 24
-    const int defaultWheelDecel = 15000;
-    bool wheelDecelerationEnvSet = false;
-    const int wheelDecelerationEnv = qEnvironmentVariableIntValue("QT_QUICK_FLICKABLE_WHEEL_DECELERATION", &wheelDecelerationEnvSet);
-    const qreal wheelDecel = wheelDecelerationEnvSet ? wheelDecelerationEnv : defaultWheelDecel;
-    const bool proportionalWheel = wheelDecel >= 15000;
-    qCDebug(lcTests) << "platform wheel decel" << defaultWheelDecel
-                     << "env wheel decel" << wheelDecelerationEnv
-                     << "expect proportional scrolling?" << proportionalWheel;
+    const bool proportionalWheel = wheelDeceleration >= 15000;
     const qreal expectedMovementFromWheelClick = qAbs(angleDelta.y()) / 120 * qApp->styleHints()->wheelScrollLines() * 24;
 
-    if (proportionalWheel)
-        QCOMPARE(flickable->contentY(), expectedMovementFromWheelClick);
+    QCOMPARE(flickable->contentY(), expectedMovementFromWheelClick);
 
     QVERIFY(flickable->property("ended").value<bool>());
     QCOMPARE(flickable->property("movementsAfterEnd").value<int>(), 0);
@@ -3746,6 +4251,7 @@ void tst_qquickflickable::positionOrFlickToChild()
     QVERIFY(QQuickTest::showView(window, testFileUrl("flickableForm.qml")));
     auto flickable = window.contentItem()->findChild<QQuickFlickable *>();
     QVERIFY(flickable);
+    QQuickFlickablePrivate::get(flickable)->flickDecayRate = 0.99;
     QList<QQuickItem *> childItems = flickable->contentItem()->childItems();
     QCOMPARE(childItems.size(), 8);
 

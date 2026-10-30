@@ -4362,7 +4362,7 @@ void tst_QQuickGridView::snapToRow()
         // flick to end
         for (int i = 0; i < 4 && !atEnd(); ++i) {
             QQuickTest::pointerFlick(device, window, 0, flickStart, flickEnd, 180);
-            QTRY_VERIFY_WITH_TIMEOUT(gridview->isMoving() == false, 2s); // wait until it stops
+            QTRY_VERIFY_WITH_TIMEOUT(gridview->isMoving() == false, 5s); // wait until it stops
         }
         QVERIFY(atEnd());
     }
@@ -4382,7 +4382,7 @@ void tst_QQuickGridView::snapToRow()
         // flick to start
         for (int i = 0; i < 4 && !atStart(); ++i) {
             QQuickTest::pointerFlick(device, window, 0, flickEnd, flickStart, 180);
-            QTRY_VERIFY_WITH_TIMEOUT(gridview->isMoving() == false, 2s); // wait until it stops
+            QTRY_VERIFY_WITH_TIMEOUT(gridview->isMoving() == false, 5s); // wait until it stops
         }
         QVERIFY(atStart());
     }

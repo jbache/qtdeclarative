@@ -2353,7 +2353,7 @@ void tst_QQuickListView::sectionsDragOutsideBounds()
     QTest::mouseMove(window, QPoint(20,-distance));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, QPoint(20,-distance));
     // view should settle back at 0
-    QTRY_COMPARE(listview->contentY(), 0.0);
+    QTRY_COMPARE_WITH_TIMEOUT(listview->contentY(), 0.0, 5s);
 
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, QPoint(20,0));
     QTest::mouseMove(window, QPoint(20,20));
@@ -2369,7 +2369,7 @@ void tst_QQuickListView::sectionsDragOutsideBounds()
         QTest::ignoreMessage(QtWarningMsg, warningRegex);
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, QPoint(20,distance));
     // view should settle back at 0
-    QTRY_COMPARE(listview->contentY(), 0.0);
+    QTRY_COMPARE_WITH_TIMEOUT(listview->contentY(), 0.0, 5s);
 
     releaseView(window);
 }
@@ -2787,6 +2787,9 @@ void tst_QQuickListView::sectionsSnap()
     QQuickListView *listview = qobject_cast<QQuickListView*>(window->rootObject());
     QTRY_VERIFY(listview != nullptr);
     listview->setSnapMode(snapMode);
+    // The slow drag's expected positions assume constant deceleration.
+    if (snapMode == QQuickListView::NoSnap)
+        listview->setFlickDeceleration(listview->flickDeceleration());
 
     QTRY_VERIFY(!QQuickItemPrivate::get(listview)->polishScheduled);
     QTRY_COMPARE(listview->currentIndex(), 0);
@@ -5659,7 +5662,7 @@ void tst_QQuickListView::snapToItemWithSectionAtStart() // QTBUG-30768
         const QPoint end = even ? start - QPoint(0, 50 + i * 10) : start + QPoint(0, 50 + i * 5);
 
         QQuickTest::pointerFlick(device, &window, 0, start, end, 180);
-        QTRY_COMPARE(listView->isMoving(), false); // wait until it stops
+        QTRY_COMPARE_WITH_TIMEOUT(listView->isMoving(), false, 5s); // wait until it stops
         QCOMPARE(int(listView->contentY()) % 30, 0);
     }
 }
@@ -8331,6 +8334,8 @@ void tst_QQuickListView::flickBothDirections()
 
     QQuickListView *listview = findItem<QQuickListView>(window->rootObject(), "list");
     QVERIFY(listview);
+    // Keep direction checks independent of the platform's flick model.
+    listview->setFlickDeceleration(listview->flickDeceleration());
 
     if (!initValues) {
         listview->setOrientation(orientation);
@@ -8343,7 +8348,7 @@ void tst_QQuickListView::flickBothDirections()
 
     QQuickTest::pointerFlick(device, window, 0, QPoint(140, 140), QPoint(25, 25), 50);
     QVERIFY(listview->isMoving());
-    QTRY_VERIFY(!listview->isMoving());
+    QTRY_VERIFY_WITH_TIMEOUT(!listview->isMoving(), 2s);
     QCOMPARE(listview->contentX(), targetPos.x());
     QCOMPARE(listview->contentY(), targetPos.y());
 }
@@ -9164,6 +9169,8 @@ void tst_QQuickListView::QTBUG_38209()
 
     QQuickListView *listview = qobject_cast<QQuickListView *>(window->rootObject());
     QVERIFY(listview);
+    // Exercise flick restarting independently of the platform's decay model.
+    listview->setFlickDeceleration(listview->flickDeceleration());
 
     // simulate mouse flick
     QQuickTest::pointerFlick(device, window.data(), 0, QPoint(200, 200), QPoint(200, 50), 100);
@@ -9218,6 +9225,9 @@ void tst_QQuickListView::programmaticFlickAtBounds2()
 
     QQuickListView *listview = qobject_cast<QQuickListView *>(window->rootObject());
     QVERIFY(listview);
+
+    // The velocity below assumes constant deceleration.
+    listview->setFlickDeceleration(listview->flickDeceleration());
 
     // move exactly one item
     qreal velocity = -qSqrt(2 * 50 * listview->flickDeceleration());
