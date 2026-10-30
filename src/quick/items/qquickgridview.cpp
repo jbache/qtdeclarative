@@ -1070,9 +1070,10 @@ bool QQuickGridViewPrivate::flick(AxisData &data, qreal minExtent, qreal maxExte
         qreal accel = eventType == QEvent::Wheel ? wheelDeceleration : deceleration;
         qreal v2 = v * v;
         qreal overshootDist = 0.0;
-        if ((maxDistance > 0.0 && v2 / (2.0f * maxDistance) < accel) || snapMode == QQuickGridView::SnapOneRow) {
+        const qreal stoppingDistance = flickDistance(v, accel, eventType);
+        if ((maxDistance > 0.0 && stoppingDistance < maxDistance) || snapMode == QQuickGridView::SnapOneRow) {
             // + rowSize()/4 to encourage moving at least one item in the flick direction
-            qreal dist = v2 / (accel * 2.0) + rowSize()/4;
+            qreal dist = stoppingDistance + rowSize()/4;
             dist = qMin(dist, maxDistance);
             if (v > 0)
                 dist = -dist;
@@ -1091,7 +1092,7 @@ bool QQuickGridViewPrivate::flick(AxisData &data, qreal minExtent, qreal maxExte
                 }
             }
             qreal adjDist = -data.flickTarget + data.move.value();
-            if (qAbs(adjDist) > qAbs(dist)) {
+            if (!usesExponentialDecay(eventType) && qAbs(adjDist) > qAbs(dist)) {
                 // Prevent painfully slow flicking - adjust velocity to suit flickDeceleration
                 qreal adjv2 = accel * 2.0f * qAbs(adjDist);
                 if (adjv2 > v2) {
@@ -1108,7 +1109,7 @@ bool QQuickGridViewPrivate::flick(AxisData &data, qreal minExtent, qreal maxExte
             overshootDist = overShoot ? overShootDistance(vSize) : 0;
         }
         timeline.reset(data.move);
-        timeline.accel(data.move, v, accel, maxDistance + overshootDist);
+        animateFlick(data, v, accel, maxDistance + overshootDist, true);
         timeline.callback(QQuickTimeLineCallback(&data.move, fixupCallback, this));
         return true;
     } else {

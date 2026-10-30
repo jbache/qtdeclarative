@@ -45,6 +45,9 @@ public:
     int accel(QQuickTimeLineValue &, qreal velocity, qreal accel);
     int accel(QQuickTimeLineValue &, qreal velocity, qreal accel, qreal maxDistance);
     int accelDistance(QQuickTimeLineValue &, qreal velocity, qreal distance);
+    int decay(QQuickTimeLineValue &, qreal velocity, qreal decayRate,
+              qreal stopVelocity, qreal maxDistance = -1);
+    void spring(QQuickTimeLineValue &, qreal destination, qreal angularFrequency);
 
     void move(QQuickTimeLineValue &, qreal destination, int time = 500);
     void move(QQuickTimeLineValue &, qreal destination, const QEasingCurve &, int time = 500);

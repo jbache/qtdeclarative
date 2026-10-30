@@ -17,6 +17,9 @@
 
 #include <algorithm>
 
+#include <cmath>
+#include <limits>
+
 QT_BEGIN_NAMESPACE
 
 Q_STATIC_LOGGING_CATEGORY(lcTl, "qt.quick.timeline")
@@ -44,6 +47,8 @@ struct QQuickTimeLinePrivate
             MoveBy, // Same as Move, but target value is now an offset from the starting value
             Accel, // Moves towards a target value over time with a constant acceleration
             AccelDistance,
+            Decay,
+            Spring,
             Execute // Calls back a function
         };
         Op() {}
@@ -53,11 +58,12 @@ struct QQuickTimeLinePrivate
               easing(es) {}
         Op(const Op &o)
             : type(o.type), length(o.length), value(o.value), value2(o.value2),
-              order(o.order), event(o.event), easing(o.easing) {}
+              order(o.order), event(o.event), easing(o.easing), distanceLimit(o.distanceLimit) {}
         Op &operator=(const Op &o) {
             type = o.type; length = o.length; value = o.value;
             value2 = o.value2; order = o.order; event = o.event;
             easing = o.easing;
+            distanceLimit = o.distanceLimit;
             return *this;
         }
 
@@ -69,6 +75,7 @@ struct QQuickTimeLinePrivate
         int order;
         QQuickTimeLineCallback event;
         QEasingCurve easing;
+        qreal distanceLimit = -1;
     };
     struct TimeLine
     {
@@ -214,6 +221,18 @@ qreal QQuickTimeLinePrivate::value(const Op &op, int time, qreal base, bool *cha
                 return base + delta;
 
             }
+        case Op::Spring: {
+            if (time == op.length)
+                return op.value;
+            const qreal phase = op.value2 * time / 1000;
+            return op.value + (base - op.value) * (1 + phase) * std::exp(-phase);
+        }
+        case Op::Decay: {
+            qreal delta = -op.value / op.value2 * std::expm1(-op.value2 * time / 1000);
+            if (op.distanceLimit >= 0)
+                delta = qBound(-op.distanceLimit, delta, op.distanceLimit);
+            return base + delta;
+        }
         case Op::Execute:
             op.event.d0(op.event.d1);
             *changed = false;
@@ -221,6 +240,56 @@ qreal QQuickTimeLinePrivate::value(const Op &op, int time, qreal base, bool *cha
     }
 
     return base;
+}
+
+void QQuickTimeLine::spring(QQuickTimeLineValue &value, qreal destination, qreal angularFrequency)
+{
+    if (!qIsFinite(destination) || !qIsFinite(angularFrequency) || angularFrequency <= 0)
+        return;
+    const qreal distance = qAbs(value.value() - destination);
+    if (!qIsFinite(distance))
+        return;
+
+    int duration = 0;
+    qreal displacement;
+    qreal velocity;
+    do {
+        duration += 16;
+        const qreal phase = angularFrequency * duration / 1000;
+        const qreal decay = std::exp(-phase);
+        displacement = distance * (1 + phase) * decay;
+        velocity = distance * angularFrequency * phase * decay;
+    } while ((displacement > 0.1 || velocity > 1) && duration < 2000);
+
+    d->add(value, QQuickTimeLinePrivate::Op(QQuickTimeLinePrivate::Op::Spring,
+                                          duration, destination, angularFrequency, d->order++));
+}
+
+int QQuickTimeLine::decay(QQuickTimeLineValue &value, qreal velocity, qreal decayRate,
+                         qreal stopVelocity, qreal maxDistance)
+{
+    if (!qIsFinite(velocity) || !qIsFinite(decayRate) || decayRate <= 0 || decayRate >= 1
+            || !qIsFinite(stopVelocity) || stopVelocity <= 0
+            || !qIsFinite(maxDistance) || (maxDistance < 0 && maxDistance != -1))
+        return -1;
+
+    const qreal speed = qAbs(velocity);
+    if (speed <= stopVelocity || maxDistance == 0)
+        return -1;
+
+    const qreal coefficient = -1000 * std::log(decayRate);
+    qreal duration = 1000 * std::log(speed / stopVelocity) / coefficient;
+    if (maxDistance > 0 && maxDistance < (speed - stopVelocity) / coefficient)
+        duration = -1000 * std::log1p(-maxDistance * coefficient / speed) / coefficient;
+    duration = std::ceil(duration);
+    if (!qIsFinite(duration) || duration < 1 || duration > std::numeric_limits<int>::max())
+        return -1;
+
+    QQuickTimeLinePrivate::Op op(QQuickTimeLinePrivate::Op::Decay, int(duration),
+                               velocity, coefficient, d->order++);
+    op.distanceLimit = maxDistance;
+    d->add(value, op);
+    return int(duration);
 }
 
 /*!

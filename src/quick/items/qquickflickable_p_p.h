@@ -120,6 +120,7 @@ public:
         qreal overshoot = 0;
         qreal transitionTo = 0;
         qreal continuousFlickVelocity = 0;
+        QEvent::Type flickEventType = QEvent::None;
         QElapsedTimer velocityTime;
         int vTime = 0;
         QQuickFlickablePrivate::Velocity smoothVelocity;
@@ -152,6 +153,10 @@ public:
                        QQuickTimeLineCallback::Callback fixupCallback,
                        QEvent::Type eventType, qreal velocity);
     void flickingStarted(bool flickingH, bool flickingV);
+    bool usesExponentialDecay(QEvent::Type eventType) const;
+    qreal flickDistance(qreal velocity, qreal acceleration, QEvent::Type eventType) const;
+    void animateFlick(AxisData &data, qreal velocity, qreal acceleration,
+                      qreal maxDistance = -1, bool snapToTarget = false);
 
     void fixupX();
     void fixupY();
@@ -212,6 +217,15 @@ public:
     QVector2D accumulatedWheelPixelDelta;
     qreal deceleration;
     qreal wheelDeceleration;
+    enum Mode { ConstantDeceleration, ExponentialDecay };
+    enum ReboundMode { ReboundFixedDuration, ReboundCriticalSpring };
+    // Platform tuning is sampled once per instance, like deceleration and maxVelocity.
+    Mode flickMode;
+    ReboundMode flickReboundMode;
+    qreal flickDecayRate;
+    qreal flickBoostVelocityThreshold;
+    int flickBoostInterval;
+    qreal flickBoostIncrement;
     qreal maxVelocity;
     QPointerEvent *delayedPressEvent;
     QBasicTimer delayedPressTimer;

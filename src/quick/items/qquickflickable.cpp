@@ -23,6 +23,7 @@
 #include <QtGui/qstylehints.h>
 #include <QtGui/qaccessible.h>
 #include <QtCore/qmath.h>
+#include <QtCore/qeasingcurve.h>
 #include <qpa/qplatformtheme.h>
 
 #include <math.h>
@@ -236,6 +237,11 @@ private:
     }
 };
 
+static qreal validatedFlickDecayRate(qreal rate)
+{
+    return qIsFinite(rate) && rate > 0 && rate < 1 ? rate : 0;
+}
+
 QQuickFlickablePrivate::QQuickFlickablePrivate()
   : contentItem(new QQuickFlickableContentItem)
     , hData(this, &QQuickFlickablePrivate::setViewportX)
@@ -259,6 +265,29 @@ QQuickFlickablePrivate::QQuickFlickablePrivate()
     , boundsMovement(QQuickFlickable::FollowBoundsBehavior)
     , rebound(nullptr)
 {
+    const auto *theme = QGuiApplicationPrivate::platformTheme();
+    const qreal platformHint = theme->themeHint(QPlatformTheme::FlickDecayRate).toReal();
+    const qreal platformDecayRate = validatedFlickDecayRate(platformHint);
+    const bool prefersDecay = platformDecayRate > 0;
+    flickMode = platformHint == -1 ? ConstantDeceleration : ExponentialDecay;
+    flickReboundMode = prefersDecay ? ReboundCriticalSpring : ReboundFixedDuration;
+    flickDecayRate = prefersDecay ? platformDecayRate : 0.998;
+
+    const qreal boostThreshold = theme->themeHint(QPlatformTheme::FlickBoostVelocityThreshold).toReal();
+    flickBoostVelocityThreshold = qIsFinite(boostThreshold) && boostThreshold > 0
+            ? boostThreshold
+            : QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickBoostVelocityThreshold)
+                  .toReal();
+    const int boostInterval = theme->themeHint(QPlatformTheme::FlickBoostInterval).toInt();
+        flickBoostInterval = boostInterval > 0
+            ? boostInterval
+            : QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickBoostInterval).toInt();
+    const qreal boostIncrement = theme->themeHint(QPlatformTheme::FlickBoostIncrement).toReal();
+    flickBoostIncrement = qIsFinite(boostIncrement) && boostIncrement > 0
+                && boostIncrement <= QML_FLICK_MULTIFLICK_MAXBOOST
+            ? boostIncrement
+            : QPlatformTheme::defaultThemeHint(QPlatformTheme::FlickBoostIncrement).toReal();
+
     const int wheelDecelerationEnv = qEnvironmentVariableIntValue("QT_QUICK_FLICKABLE_WHEEL_DECELERATION");
     if (wheelDecelerationEnv > 0)
         wheelDeceleration = wheelDecelerationEnv;
@@ -372,12 +401,14 @@ void QQuickFlickablePrivate::itemGeometryChanged(QQuickItem *item, QQuickGeometr
 bool QQuickFlickablePrivate::flickX(QEvent::Type eventType, qreal velocity)
 {
     Q_Q(QQuickFlickable);
+    hData.flickEventType = eventType;
     return flick(hData, q->minXExtent(), q->maxXExtent(), q->width(), fixupX_callback, eventType, velocity);
 }
 
 bool QQuickFlickablePrivate::flickY(QEvent::Type eventType, qreal velocity)
 {
     Q_Q(QQuickFlickable);
+    vData.flickEventType = eventType;
     return flick(vData, q->minYExtent(), q->maxYExtent(), q->height(), fixupY_callback, eventType, velocity);
 }
 
@@ -419,9 +450,9 @@ bool QQuickFlickablePrivate::flick(AxisData &data, qreal minExtent, qreal maxExt
         resetTimeline(data);
         if (!data.inOvershoot) {
             if (boundsBehavior & QQuickFlickable::OvershootBounds)
-                timeline.accel(data.move, v, accel);
+                animateFlick(data, v, accel);
             else
-                timeline.accel(data.move, v, accel, maxDistance);
+                animateFlick(data, v, accel, maxDistance);
         }
         timeline.callback(QQuickTimeLineCallback(&data.move, fixupCallback, this));
 
@@ -435,6 +466,39 @@ bool QQuickFlickablePrivate::flick(AxisData &data, qreal minExtent, qreal maxExt
         fixup(data, minExtent, maxExtent);
         return false;
     }
+}
+
+bool QQuickFlickablePrivate::usesExponentialDecay(QEvent::Type eventType) const
+{
+    return flickMode == ExponentialDecay && eventType != QEvent::Wheel;
+}
+
+qreal QQuickFlickablePrivate::flickDistance(qreal velocity, qreal acceleration,
+                                            QEvent::Type eventType) const
+{
+    if (usesExponentialDecay(eventType))
+        return qMax(qreal(0), (qAbs(velocity) - 1) / (-1000 * qLn(flickDecayRate)));
+    return velocity * velocity / (2 * acceleration);
+}
+
+void QQuickFlickablePrivate::animateFlick(AxisData &data, qreal velocity,
+                                       qreal acceleration, qreal maxDistance, bool snapToTarget)
+{
+    if (usesExponentialDecay(data.flickEventType)) {
+        qreal rate = flickDecayRate;
+        if (snapToTarget) {
+            maxDistance = qAbs(data.flickTarget - data.move.value());
+            if (maxDistance <= 0 || qAbs(velocity) <= 1)
+                return;
+            rate = qExp(-(qAbs(velocity) - 1) / (1000 * maxDistance));
+        }
+        timeline.decay(data.move, velocity, rate, 1, maxDistance);
+        return;
+    }
+    if (maxDistance < 0)
+        timeline.accel(data.move, velocity, acceleration);
+    else
+        timeline.accel(data.move, velocity, acceleration, maxDistance);
 }
 
 void QQuickFlickablePrivate::fixupY_callback(void *data)
@@ -481,12 +545,18 @@ void QQuickFlickablePrivate::adjustContentPos(AxisData &data, qreal toPos)
     case ExtentChanged:
         // The target has changed. Don't start from the beginning; just complete the
         // second half of the animation using the new extent.
-        timeline.move(data.move, toPos, QEasingCurve(QEasingCurve::OutExpo), 3*fixupDuration/4);
+        if (flickReboundMode == QQuickFlickablePrivate::ReboundCriticalSpring)
+            timeline.spring(data.move, toPos, 12);
+        else
+            timeline.move(data.move, toPos, QEasingCurve(QEasingCurve::OutExpo), 3*fixupDuration/4);
         data.fixingUp = true;
         break;
     default: {
             if (data.transitionToBounds && data.transitionToBounds->startTransition(&data, toPos)) {
                 q->movementStarting();
+                data.fixingUp = true;
+            } else if (flickReboundMode == QQuickFlickablePrivate::ReboundCriticalSpring) {
+                timeline.spring(data.move, toPos, 12);
                 data.fixingUp = true;
             } else {
                 qreal dist = toPos - data.move;
@@ -1162,7 +1232,7 @@ void QQuickFlickablePrivate::handlePressEvent(QPointerEvent *event)
         // trying to speed up or slow down, not click some child item.
         stealGrab = true;
         int flickTime = timeline.time();
-        if (flickTime > 600) {
+        if (flickTime > flickBoostInterval) {
             // too long between flicks - cancel boost
             hData.continuousFlickVelocity = 0;
             vData.continuousFlickVelocity = 0;
@@ -1170,7 +1240,7 @@ void QQuickFlickablePrivate::handlePressEvent(QPointerEvent *event)
         } else {
             hData.continuousFlickVelocity = -hData.smoothVelocity.value();
             vData.continuousFlickVelocity = -vData.smoothVelocity.value();
-            if (flickTime > 300) // slower flicking - reduce boost
+            if (flickTime > flickBoostInterval / 2) // slower flicking - reduce boost
                 flickBoost = qMax(1.0, flickBoost - 0.5);
         }
     } else {
@@ -1532,7 +1602,7 @@ void QQuickFlickablePrivate::handleReleaseEvent(QPointerEvent *event)
     } else if (vData.continuousFlickVelocity != 0.0
                && vData.viewSize/q->height() > QML_FLICK_MULTIFLICK_RATIO
                && ((vVelocity > 0) == (vData.continuousFlickVelocity > 0))
-               && qAbs(vVelocity) > QML_FLICK_MULTIFLICK_THRESHOLD) {
+               && qAbs(vVelocity) > flickBoostVelocityThreshold) {
         // accelerate flick for large view flicked quickly
         canBoost = true;
     }
@@ -1547,12 +1617,12 @@ void QQuickFlickablePrivate::handleReleaseEvent(QPointerEvent *event)
     } else if (hData.continuousFlickVelocity != 0.0
                && hData.viewSize/q->width() > QML_FLICK_MULTIFLICK_RATIO
                && ((hVelocity > 0) == (hData.continuousFlickVelocity > 0))
-               && qAbs(hVelocity) > QML_FLICK_MULTIFLICK_THRESHOLD) {
+               && qAbs(hVelocity) > flickBoostVelocityThreshold) {
         // accelerate flick for large view flicked quickly
         canBoost = true;
     }
 
-    flickBoost = canBoost ? qBound(1.0, flickBoost+0.25, QML_FLICK_MULTIFLICK_MAXBOOST) : 1.0;
+    flickBoost = canBoost ? qBound(1.0, flickBoost + flickBoostIncrement, QML_FLICK_MULTIFLICK_MAXBOOST) : 1.0;
     const int flickThreshold = QGuiApplicationPrivate::platformTheme()->themeHint(QPlatformTheme::FlickStartDistance).toInt();
 
     bool anyPointGrabbed = event->points().constEnd() !=
@@ -2439,13 +2509,13 @@ void QQuickFlickable::flickTo(const QPointF &newPosition)
     const qreal deltaX = newPosition.x() - currentPosition.x();
     const qreal deltaY = newPosition.y() - currentPosition.y();
 
-    // Calculate velocity based on distance to travel
-    // Formula: v = sqrt(2 * deceleration * distance)
-
     if (xflick() && qAbs(deltaX) > 0.5) {
         const qreal decel = flickDeceleration();
-        qreal velocity = qSqrt(2.0 * decel * qAbs(deltaX));
-        if (qAbs(velocity) < _q_MinimumFlickVelocity)
+        qreal velocity = d->flickMode == QQuickFlickablePrivate::ExponentialDecay
+                ? 1 - 1000 * qLn(d->flickDecayRate) * qAbs(deltaX)
+                : qSqrt(2.0 * decel * qAbs(deltaX));
+        if (d->flickMode == QQuickFlickablePrivate::ConstantDeceleration
+            && qAbs(velocity) < _q_MinimumFlickVelocity)
             velocity = 0;
         const qreal maxVel = maximumFlickVelocity();
         if (maxVel > 0 && velocity > maxVel)
@@ -2455,8 +2525,11 @@ void QQuickFlickable::flickTo(const QPointF &newPosition)
 
     if (yflick() && qAbs(deltaY) > 0.5) {
         const qreal decel = flickDeceleration();
-        qreal velocity = qSqrt(2.0 * decel * qAbs(deltaY));
-        if (qAbs(velocity) < _q_MinimumFlickVelocity)
+        qreal velocity = d->flickMode == QQuickFlickablePrivate::ExponentialDecay
+                ? 1 - 1000 * qLn(d->flickDecayRate) * qAbs(deltaY)
+                : qSqrt(2.0 * decel * qAbs(deltaY));
+        if (d->flickMode == QQuickFlickablePrivate::ConstantDeceleration
+            && qAbs(velocity) < _q_MinimumFlickVelocity)
             velocity = 0;
         const qreal maxVel = maximumFlickVelocity();
         if (maxVel > 0 && velocity > maxVel)
@@ -3227,6 +3300,14 @@ void QQuickFlickable::setMaximumFlickVelocity(qreal v)
     "frictionless", and 10000 feels quite "sticky".
 
     The default value is platform dependent. Values of zero or less are not allowed.
+
+    Flicking uses exponential velocity decay by default, unless overridden by
+    the platform. Explicitly setting this property selects the legacy
+    constant-deceleration physics, even when the assigned value is equal to
+    the current value. Reading this property does not change the physics.
+
+    This choice does not affect mouse-wheel scrolling, native trackpad momentum,
+    or the rebound animation used when returning to the bounds.
 */
 qreal QQuickFlickable::flickDeceleration() const
 {
@@ -3237,6 +3318,7 @@ qreal QQuickFlickable::flickDeceleration() const
 void QQuickFlickable::setFlickDeceleration(qreal deceleration)
 {
     Q_D(QQuickFlickable);
+    d->flickMode = QQuickFlickablePrivate::ConstantDeceleration;
     if (deceleration == d->deceleration)
         return;
     d->deceleration = qMax(0.001, deceleration);
